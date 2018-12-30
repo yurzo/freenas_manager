@@ -22,6 +22,7 @@ setup(
     install_requires=[
         'requests',
         'click',
+        'parse',
         'python-nmap',
         'pynetgear'
         ],
