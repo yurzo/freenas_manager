@@ -10,25 +10,24 @@ from setuptools import setup
 def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
+
 setup(
-    name = 'freenas_manager',
-    version = '0.0.1',
-    author = 'Damian Yurzola',
-    author_email = 'damian@yurzola.net',
-    description = ('Manage freenas uptime'),
-    license = 'MIT',
-    keywords = 'example documentation tutorial',
+    name="freenas_manager",
+    version="0.0.1",
+    author="Damian Yurzola",
+    author_email="damian@yurzola.net",
+    description=("Manage freenas uptime"),
+    license="MIT",
+    keywords="example documentation tutorial",
     # url = 'http://TBD',
     install_requires=[
-        'requests',
-        'click',
-        'parse',
-        'python-nmap',
-        'pynetgear'
-        ],
-    long_description=read('README.md'),
-    classifiers=[
-        'Development Status :: 3 - Alpha',
-        'Topic :: Utilities',
+        "requests",
+        "click",
+        "parse",
+        "python-nmap",
+        "pynetgear",
+        "loguru",
     ],
+    long_description=read("README.md"),
+    classifiers=["Development Status :: 3 - Alpha", "Topic :: Utilities"],
 )
