@@ -1,53 +1,69 @@
 import asyncio
 import datetime as dt
 import json
-import logging
+
+from loguru import logger
 
 import pynetgear
 
-logger = logging.getLogger(__name__)
-
 
 class Host:
+
+    __instances__ = None
+
     @staticmethod
     def format_mac(mac):
-        tokens = mac.split(":")
-        int_tokens = [int(token, 16) for token in tokens]
-        hexes = [f"{token:02x}" for token in int_tokens]
-        return ":".join(hexes)
+        try:
+            tokens = mac.split(":")
+            int_tokens = [int(token, 16) for token in tokens]
+            hexes = [f"{token:02x}" for token in int_tokens]
+            return ":".join(hexes)
+        except ValueError:
+            return None
+
+    @classmethod
+    def get_instances(cls):
+        if cls.__instances__:
+            return cls.__instances__
+        else:
+            return {}
 
     def __new__(cls, mac, **kwargs):
 
         mac = cls.format_mac(mac)
 
-        if not hasattr(cls, "__instances__"):
-            setattr(cls, "__instances__", {})
+        assert mac is not None
+
+        if cls.__instances__ is None:
+            cls.__instances__ = {}
 
         if mac not in cls.__instances__:
+            logger.debug(f"New mac: {mac}, creating host")
             obj = super(Host, cls).__new__(cls)
             cls.__instances__[mac] = obj
+        else:
+            logger.debug(f"Existing mac: {mac}")
 
         return cls.__instances__[mac]
 
-    def __del__(self):
+    def destroy(self):
         logger.warning(f"deleting host: {self!r}")
         self.__instances__.pop(self.mac)
+        logger.warning(f"host deleted")
 
     def __init__(self, mac, ip=None, name=None, type=None):
-
-        # reentry = False
 
         mac = self.format_mac(mac)
 
         if hasattr(self, "mac"):
             assert self.mac == mac
-            # before = self.__repr__()
-            # reentry = True
 
         self.mac = mac
 
         if not hasattr(self, "task"):
             self.task = None
+
+        self._updated = False
 
         self.update_if_better("ip", ip)
         self.update_if_better("name", name)
@@ -57,21 +73,27 @@ class Host:
             loop = asyncio.get_event_loop()
             self.wall_up = dt.datetime.now()
             self.loop_up = loop.time()
-
-        # after = self.__repr__()
-        # if reentry and name is not None:
-        #     logger.debug(f'before: {before}')
-        #     logger.debug(f'after: {after}')
+            logger.debug(f"{self.mac}.uptime:{self.wall_up}")
 
         if self.task is None:
             loop = asyncio.get_event_loop()
-            self.task = loop.create_task(self.ping())
-            # self.task.add_done_callback(self.del_task)
-            logger.debug(f"Add ping task: {self.task}")
+            logger.debug(f"adding heartbeat task...")
+            self.task = loop.create_task(self.heart_beat())
 
     def update_if_better(self, field, value):
-        if not hasattr(self, field) or value is not None:
+        if not hasattr(self, field):
             setattr(self, field, value)
+        elif value is not None:
+            current = getattr(self, field)
+            if current != value:
+                self._updated = True
+            setattr(self, field, value)
+
+    @property
+    def updated(self):
+        result = self._updated
+        self._updated = False
+        return result
 
     def __repr__(self):
         tokens = [
@@ -79,7 +101,6 @@ class Host:
             f"ip={self.ip}",
             f"name={self.name}",
             f"uptime={self.uptime}",
-            # f'done={self.task.done()}',
         ]
         sep = ", "
         return f"Host({sep.join(tokens)})"
@@ -87,16 +108,21 @@ class Host:
     @property
     def uptime(self):
         loop = asyncio.get_event_loop()
-        # return (loop.time - self.loop_up, dt.datetime.now() - self.wall_up)
         return loop.time() - self.loop_up
 
-    async def ping(self):
+    @staticmethod
+    async def ping(ip):
+        result = await run_subprocess(f"ping -c 5 -W 1000 {ip}")
+        returncode = result[2]
+        logger.debug(f"pinged {ip}, returncode={returncode}")
+        return returncode == 0
+
+    async def heart_beat(self):
         returncode = 0
         try:
-            while returncode == 0:
-                await asyncio.sleep(5)
-                result = await run_subprocess(f"ping -c 5 -W 1000 {self.ip}")
-                returncode = result[2]
+            while await self.ping(self.ip):
+                await asyncio.sleep(15)
+            logger.debug(f"ping {self.ip} failed")
         except asyncio.CancelledError:
             logger.debug("shutting down")
             raise
@@ -104,8 +130,7 @@ class Host:
             logger.debug("closed")
 
         logger.warning(f"{self!r} stopped pinging")
-
-        del (self)
+        self.destroy()
 
 
 def get_passwords():

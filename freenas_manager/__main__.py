@@ -2,7 +2,9 @@ import asyncio
 import concurrent.futures
 import functools
 import os
+import platform
 import signal
+import sys
 
 import freenas_manager
 from freenas_manager import Host, run_subprocess
@@ -27,24 +29,25 @@ def cancel_tasks(signame, gathered_tasks=None):
     if not all(cancelled):
         logger.debug(f"fallback to cancellation by task")
         for n, task in enumerate(tasks):
-            task.cancel()
-            logger.debug(f"cancel {n}: {task!r}")
+            if task.done():
+                continue
+            if not task.cancelled():
+                task.cancel()
+                logger.debug(f"cancel {n}: {task!r}")
 
 
-async def ip_monitor(queue):
-
+async def ip_monitor(ip_queue):
     MAGIC_STRING = "Nmap scan report for"
     try:
         while True:
-            logger.debug("calling nmap")
             stdout, stderr, _ = await run_subprocess("nmap -sP 192.168.1.0/24")
             for line in stdout.splitlines():
                 if MAGIC_STRING in line:
                     ip = line.replace(MAGIC_STRING, "").strip()
-                    logger.debug(f"active IPs: {ip}")
-                    await queue.put(ip)
+                    logger.debug(f"nmap active IPs: {ip}")
+                    await ip_queue.put(ip)
             logger.debug("sleeping")
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
     except asyncio.CancelledError:
         logger.debug("shutting down")
         raise
@@ -55,17 +58,31 @@ async def ip_monitor(queue):
 async def mac_resolver(ip_queue, mac_queue):
     try:
         while True:
-            # logger.debug(f'items in queue: {queue.qsize()}')
-            # await asyncio.sleep(5)
-            logger.debug("calling arp")
+
             ip = await ip_queue.get()
-            stdout, stderr, _ = await run_subprocess(f"arp {ip}")
-            parsed = parse.parse("? ({ip}) at {mac} on en0 ifscope{}[ethernet]", stdout)
+            opt = "" if platform.system() == "Darwin" else "-a"
+            cmd = " ".join(["arp", opt, ip])
+            stdout, stderr, returncode = await run_subprocess(cmd)
+
+            parsed = parse.parse("? ({ip}) at {mac} {reminder}", stdout)
+
+            if returncode != 0:
+                logger.debug(f"bad arp result for {ip}")
+                logger.debug(f"command was: {cmd}")
+                logger.debug(stdout, stderr, parsed)
+                continue
+
+            if "entries no match found" in stdout:
+                logger.debug(f"bad arp result for {ip}")
+                logger.debug(f"command was: {cmd}")
+                logger.debug(stdout, stderr, parsed)
+                continue
 
             if parsed is None:
-                logger.debug("Woops")
-                logger.debug(stdout)
+                logger.debug("Arp completed but we don't understand the answer")
+                logger.debug(stdout, stderr, parsed)
                 raise TypeError
+
             await mac_queue.put(parsed.named)
 
     except asyncio.CancelledError:
@@ -79,8 +96,13 @@ async def assemble_hosts(mac_queue):
     try:
         while True:
             ip_mac_map = await mac_queue.get()
-
-            freenas_manager.Host(mac=ip_mac_map["mac"], ip=ip_mac_map["ip"])
+            mac = Host.format_mac(ip_mac_map["mac"])
+            ip = ip_mac_map["ip"]
+            if mac is not None and await Host.ping(ip):
+                Host(mac=mac, ip=ip)
+            else:
+                logger.debug(f"mac is None or ip not pingable")
+                logger.debug(f"mac {mac}, ip: {ip}")
 
     except asyncio.CancelledError:
         logger.debug("shutting down")
@@ -101,28 +123,17 @@ async def name_resolver():
             for result in results:
                 mac = Host.format_mac(result.mac)
 
-                # logger.debug(f'{mac}')
-                # logger.debug(f'{Host.__instances__.keys()}')
+                if mac is None:
+                    continue
 
-                if mac in Host.__instances__:
-                    ip = Host.__instances__[mac].ip
-                    freenas_manager.Host(
-                        mac=mac, ip=ip, name=result.name, type=result.type
-                    )
+                instances = Host.get_instances()
 
-    except asyncio.CancelledError:
-        logger.debug("shutting down")
-        raise
-    finally:
-        logger.debug("closed")
+                # get_router_data might return stale values
+                # so onlu update hosts that already Existing
 
-
-async def manager():
-    try:
-        while True:
-            await asyncio.sleep(10)
-            macs = ["70:3e:ac:81:a7:b5", "04:69:f8:67:dc:90"]
-            macs = [Host.format_mac(mac) for mac in macs]
+                if mac in instances:
+                    ip = instances[mac].ip
+                    Host(mac=mac, ip=ip, name=result.name, type=result.type)
 
     except asyncio.CancelledError:
         logger.debug("shutting down")
@@ -132,27 +143,55 @@ async def manager():
 
 
 async def task_monitor(ip_queue, mac_queue):
+    previous_macs = set()
+    loop = asyncio.get_event_loop()
     try:
         while True:
-            loop = asyncio.get_event_loop()
-            logger.info(f"time: {loop.time()}")
+
             tasks = asyncio.Task.all_tasks()
 
             total = len(tasks)
             cancelled = sum([task.cancelled() for task in tasks])
             done = sum([task.done() for task in tasks])
+            active = total - cancelled - done
 
-            logger.info(f"active tasks: {total - cancelled - done}")
-            logger.info(f"cancelled tasks: {cancelled}")
-            logger.info(f"done tasks: {done}")
+            instances = Host.get_instances()
 
-            logger.info(f"ip queue depth: {ip_queue.qsize()}")
-            logger.info(f"mac queue depth: {mac_queue.qsize()}")
-            if hasattr(Host, "__instances__"):
-                logger.info(f"hosts: {len(Host.__instances__)}")
+            monitor = " ".join(
+                [
+                    f"active: {active}",
+                    f"cancelled: {cancelled}",
+                    f"done: {done}",
+                    f"ip_queue: {ip_queue.qsize()}",
+                    f"mac_queue: {mac_queue.qsize()}",
+                    f"hosts: {len(instances)}",
+                ]
+            )
 
-                for host in Host.__instances__.values():
-                    logger.info(f"{host!r}")
+            logger.debug(monitor)
+
+            if instances:
+
+                current_macs = set(instances.keys())
+
+                lost_macs = previous_macs - current_macs
+                new_macs = current_macs - previous_macs
+
+                for mac in lost_macs:
+                    logger.info(f"departed: {mac}")
+
+                for mac in new_macs:
+                    host = instances[mac]
+                    logger.info(f"arrived: {host!r}")
+
+                for host in instances.values():
+                    if host.updated:
+                        logger.info(f"updated: {host!r}")
+
+                if lost_macs or new_macs:
+                    logger.info(monitor)
+
+                previous_macs = current_macs
 
             await asyncio.sleep(5)
     except asyncio.CancelledError:
@@ -162,34 +201,7 @@ async def task_monitor(ip_queue, mac_queue):
         logger.debug("closed")
 
 
-# def configure_logging():
-#
-#     formatter = logging.Formatter(
-#         "%(asctime)s %(levelname)s (%(name)s.%(funcName)s): %(message)s"
-#     )
-#
-#     stream_handler = logging.StreamHandler()
-#     stream_handler.setFormatter(formatter)
-#     stream_handler.setLevel(logging.WARNING)
-#
-#     file_handler = logging.FileHandler("output.log")
-#     file_handler.setFormatter(formatter)
-#     file_handler.setLevel(logging.DEBUG)
-#
-#     logger = logging.getLogger(__name__)
-#     logger.root.setLevel(logging.DEBUG)
-#     logger.root.addHandler(stream_handler)
-#     logger.root.addHandler(file_handler)
-#
-#     file_handler = logging.FileHandler("output_info.log")
-#     file_handler.setFormatter(formatter)
-#     file_handler.setLevel(logging.INFO)
-#     logger.root.addHandler(file_handler)
-
-
 def main():
-    # logging.basicConfig(filename='example.log',level=logging.DEBUG)
-    # configure_logging()
 
     loop = asyncio.get_event_loop()
 
@@ -202,7 +214,6 @@ def main():
         assemble_hosts(mac_queue),
         name_resolver(),
         task_monitor(ip_queue, mac_queue),
-        manager(),
     )
 
     loop = asyncio.get_event_loop()
@@ -223,4 +234,17 @@ def main():
 
 
 if __name__ == "__main__":
+
+    logger.remove(0)  # remove default logger
+    DEBUG = True
+    if DEBUG:
+        logger.add(sys.stderr, level="INFO")
+    logger.add(
+        "output.log",
+        level="DEBUG",
+        rotation="1 day",
+        retention="10 days",
+        compression="zip",
+    )
+
     main()
