@@ -60,34 +60,63 @@ class Host:
 
         self.mac = mac
 
-        if not hasattr(self, "task"):
-            self.task = None
+        self.update_if_better("_ip", ip)
+        self.update_if_better("_name", name)
+        self.update_if_better("_type", type)
 
         self._updated = False
 
-        self.update_if_better("ip", ip)
-        self.update_if_better("name", name)
-        self.update_if_better("type", type)
+        # if not hasattr(self, "task"):
+        #     self.task = None
+
+        # self._updated = False
+
+        loop = asyncio.get_event_loop()
 
         if not hasattr(self, "wall_up"):
-            loop = asyncio.get_event_loop()
             self.wall_up = dt.datetime.now()
             self.loop_up = loop.time()
             logger.debug(f"{self.mac}.uptime:{self.wall_up}")
 
-        if self.task is None:
-            loop = asyncio.get_event_loop()
+        if not hasattr(self, 'task'):
             logger.debug(f"adding heartbeat task...")
             self.task = loop.create_task(self.heart_beat())
 
+        self.last_refresh = loop.time()
+
     def update_if_better(self, field, value):
-        if not hasattr(self, field):
+        if not hasattr(self, field) or value is not None:
             setattr(self, field, value)
-        elif value is not None:
-            current = getattr(self, field)
-            if current != value:
-                self._updated = True
+
+    def set_and_flag(self, field, value):
+        current = getattr(self, field)
+        if current != value and value is not None:
             setattr(self, field, value)
+            self._updated = True
+
+    @property
+    def ip(self):
+        return self._ip
+
+    @ip.setter
+    def ip(self, _ip):
+        self.set_and_flag("_ip", _ip)
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, _name):
+        self.set_and_flag("_name", _name)
+
+    @property
+    def type(self):
+        return self._type
+
+    @type.setter
+    def type(self, _type):
+        self.set_and_flag("_type", _type)
 
     @property
     def updated(self):
@@ -100,7 +129,9 @@ class Host:
             f"mac={self.mac}",
             f"ip={self.ip}",
             f"name={self.name}",
-            f"uptime={self.uptime}",
+            f"uptime={self.uptime:2.2f}",
+            f"type={self.type}",
+            f"dwell={self.dwell:2.2f}",
         ]
         sep = ", "
         return f"Host({sep.join(tokens)})"
@@ -110,30 +141,48 @@ class Host:
         loop = asyncio.get_event_loop()
         return loop.time() - self.loop_up
 
-    @staticmethod
-    async def ping(ip):
-        logger.debug(f"starting ping {ip}")
-        result = await run_subprocess(f"ping -c 5 {ip}")
-        returncode = result[2]
-        logger.debug(f"pinged {ip}, returncode={returncode}")
-        return returncode == 0
+    @property
+    def dwell(self):
+        loop = asyncio.get_event_loop()
+        return loop.time() - self.last_refresh
+
+    # @staticmethod
+    # async def ping(ip):
+    #     logger.debug(f"starting ping {ip}")
+    #     result = await run_subprocess(f"ping -c 5 {ip}")
+    #     returncode = result[2]
+    #     logger.debug(f"pinged {ip}, returncode={returncode}")
+    #     return returncode == 0
 
     async def heart_beat(self):
-        returncode = 0
         try:
-            for retry in range(4):
-                while await self.ping(self.ip):
-                    await asyncio.sleep(15)
-                logger.debug(f"ping {self.ip} failed - try {retry + 1}/4")
-
+            while self.dwell < 120:
+                await asyncio.sleep(15)
+            logger.debug(f"{self.dwell} since last seen")
         except asyncio.CancelledError:
             logger.debug("shutting down")
             raise
         finally:
             logger.debug("closed")
-
-        logger.warning(f"{self!r} stopped pinging")
+        logger.warning(f"{self!r} stopped refreshing")
         self.destroy()
+
+    # async def heart_beat(self):
+    #     returncode = 0
+    #     try:
+    #         for retry in range(4):
+    #             while await self.ping(self.ip):
+    #                 await asyncio.sleep(15)
+    #             logger.debug(f"ping {self.ip} failed - try {retry + 1}/4")
+    #
+    #     except asyncio.CancelledError:
+    #         logger.debug("shutting down")
+    #         raise
+    #     finally:
+    #         logger.debug("closed")
+    #
+    #     logger.warning(f"{self!r} stopped pinging")
+    #     self.destroy()
 
 
 def get_passwords():

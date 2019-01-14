@@ -44,7 +44,7 @@ async def ip_monitor(ip_queue):
             for line in stdout.splitlines():
                 if MAGIC_STRING in line:
                     ip = line.replace(MAGIC_STRING, "").strip()
-                    logger.debug(f"nmap active IPs: {ip}")
+                    logger.debug(f"nmap active ip: {ip}")
                     await ip_queue.put(ip)
                     await asyncio.sleep(1)
             await asyncio.sleep(30)
@@ -86,7 +86,7 @@ async def mac_resolver(ip_queue, mac_queue):
             mac = Host.format_mac(parsed["mac"])
             ip = parsed["ip"]
 
-            if mac is not None and await Host.ping(ip):
+            if mac is not None:
                 await mac_queue.put(parsed.named)
 
     except asyncio.CancelledError:
@@ -102,11 +102,7 @@ async def assemble_hosts(mac_queue):
             ip_mac_map = await mac_queue.get()
             mac = Host.format_mac(ip_mac_map["mac"])
             ip = ip_mac_map["ip"]
-            if mac is not None:
-                Host(mac=mac, ip=ip)
-            else:
-                logger.debug(f"mac is None or ip not pingable")
-                logger.debug(f"mac {mac}, ip: {ip}")
+            Host(mac=mac, ip=ip)
 
     except asyncio.CancelledError:
         logger.debug("shutting down")
@@ -136,8 +132,9 @@ async def name_resolver():
                 # so onlu update hosts that already Existing
 
                 if mac in instances:
-                    ip = instances[mac].ip
-                    Host(mac=mac, ip=ip, name=result.name, type=result.type)
+                    host = instances[mac]
+                    host.name = result.name
+                    host.type = result.type
 
     except asyncio.CancelledError:
         logger.debug("shutting down")
