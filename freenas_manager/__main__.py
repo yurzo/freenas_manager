@@ -46,7 +46,7 @@ async def ip_monitor(ip_queue):
                     ip = line.replace(MAGIC_STRING, "").strip()
                     logger.debug(f"nmap active IPs: {ip}")
                     await ip_queue.put(ip)
-            logger.debug("sleeping")
+                    await asyncio.sleep(1)
             await asyncio.sleep(30)
     except asyncio.CancelledError:
         logger.debug("shutting down")
@@ -67,7 +67,7 @@ async def mac_resolver(ip_queue, mac_queue):
             parsed = parse.parse("? ({ip}) at {mac} {reminder}", stdout)
 
             if returncode != 0:
-                logger.debug(f"bad arp result for {ip}")
+                logger.warning(f"bad arp result for {ip}")
                 logger.debug(f"command was: {cmd}")
                 logger.debug(stdout, stderr, parsed)
                 continue
@@ -83,7 +83,11 @@ async def mac_resolver(ip_queue, mac_queue):
                 logger.debug(stdout, stderr, parsed)
                 raise TypeError
 
-            await mac_queue.put(parsed.named)
+            mac = Host.format_mac(parsed["mac"])
+            ip = parsed["ip"]
+
+            if mac is not None and await Host.ping(ip):
+                await mac_queue.put(parsed.named)
 
     except asyncio.CancelledError:
         logger.debug("shutting down")
@@ -98,7 +102,7 @@ async def assemble_hosts(mac_queue):
             ip_mac_map = await mac_queue.get()
             mac = Host.format_mac(ip_mac_map["mac"])
             ip = ip_mac_map["ip"]
-            if mac is not None and await Host.ping(ip):
+            if mac is not None:
                 Host(mac=mac, ip=ip)
             else:
                 logger.debug(f"mac is None or ip not pingable")

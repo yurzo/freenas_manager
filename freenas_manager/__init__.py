@@ -112,7 +112,8 @@ class Host:
 
     @staticmethod
     async def ping(ip):
-        result = await run_subprocess(f"ping -c 5 -W 1000 {ip}")
+        logger.debug(f"starting ping {ip}")
+        result = await run_subprocess(f"ping -c 5 {ip}")
         returncode = result[2]
         logger.debug(f"pinged {ip}, returncode={returncode}")
         return returncode == 0
@@ -120,9 +121,11 @@ class Host:
     async def heart_beat(self):
         returncode = 0
         try:
-            while await self.ping(self.ip):
-                await asyncio.sleep(15)
-            logger.debug(f"ping {self.ip} failed")
+            for retry in range(4):
+                while await self.ping(self.ip):
+                    await asyncio.sleep(15)
+                logger.debug(f"ping {self.ip} failed - try {retry + 1}/4")
+
         except asyncio.CancelledError:
             logger.debug("shutting down")
             raise
@@ -148,7 +151,9 @@ async def run_subprocess(cmd):
     proc = await asyncio.create_subprocess_shell(
         cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-
-    stdout, stderr = await proc.communicate()
-
-    return stdout.decode(), stderr.decode(), proc.returncode
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        return stdout.decode(), stderr.decode(), proc.returncode
+    except asyncio.TimeoutError:
+        logger.warning(f"'{cmd}' timed out")
+        return "", "", 1
